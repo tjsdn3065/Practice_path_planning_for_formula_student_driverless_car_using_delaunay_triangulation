@@ -55,7 +55,7 @@ struct Config {
   double dedup_eps = 1e-12;
   bool   add_micro_jitter = true;
   double jitter_eps = 1e-9;
-  int    samples = 300;   // 센터라인 재샘플 수
+  int    samples = 200;   // 센터라인 재샘플 수
   int    knn_k   = 8;      // MST k-NN
 
   // CDT 강제삽입/복구 가드
@@ -1300,6 +1300,9 @@ int main(int argc, char** argv){
     fo2.setf(std::ios::fixed); fo2.precision(9);
     fo2 << "s,x,y,heading_rad,curvature,dist_to_inner,dist_to_outer,width\n";
 
+    // 첫 샘플 값을 저장해두었다가, 폐곡 옵션이면 마지막 줄로 재기록
+    double x0=0, y0=0, hd0=0, k0=0, din0=0, dout0=0, w0=0;
+
     for(int k=0;k<C.samples;++k){
       double si = s0 + L * (double(k) / double(C.samples));  // s-축 균일
       double x, xp, xpp, y, yp, ypp;
@@ -1328,8 +1331,18 @@ int main(int argc, char** argv){
       double width = d_in + d_out;
       double si_rel = si - s0;  // 0..L
 
+      if(k==0){
+        x0=x; y0=y; hd0=heading; k0=curvature; din0=d_in; dout0=d_out; w0=width;
+      }
+
       fo2 << si_rel << "," << x << "," << y << "," << heading << "," << curvature
           << "," << d_in << "," << d_out << "," << width << "\n";
+    }
+
+    // 폐곡이면 마지막 한 줄( s=L ) 추가: 첫 샘플을 복제하여 완전한 폐곡 자료 보장
+    if (C.emit_closed_duplicate){
+      fo2 << L << "," << x0 << "," << y0 << "," << hd0 << "," << k0
+          << "," << din0 << "," << dout0 << "," << w0 << "\n";
     }
   }
 
@@ -1341,8 +1354,17 @@ int main(int argc, char** argv){
 
   // [9] 최소 곡률 raceline (논문식 흐름으로 재구성)
   {
+    // 최적화는 중복 마지막 점 없이 수행(균일 주기 미분의 h=L/N 일관성 확보)
+    std::vector<geom::Vec2> center_for_opt = center;
+    if (C.emit_closed_duplicate &&
+        center_for_opt.size()>=2 &&
+        geom::almostEq(center_for_opt.front(), center_for_opt.back(), 1e-12))
+    {
+      center_for_opt.pop_back(); // N = samples
+    }
+
     auto res = raceline_min_curv::compute_min_curvature_raceline(
-        center, innerE, outerE, C.veh_width_m, /*L=*/L
+        center_for_opt, innerE, outerE, C.veh_width_m, /*L=*/L
     );
 
     // raceline 좌표
@@ -1350,21 +1372,38 @@ int main(int argc, char** argv){
       std::ofstream fo(base + "_raceline.csv");
       if(!fo){ cerr<<"[ERR] save raceline\n"; return 7; }
       fo.setf(std::ios::fixed); fo.precision(9);
-      for(const auto& p: res.raceline) fo<<p.x<<","<<p.y<<"\n";
+
+      const int N = (int)res.raceline.size(); // 보통 samples
+      for(int k=0;k<N;++k) fo<<res.raceline[k].x<<","<<res.raceline[k].y<<"\n";
+
+      // 폐곡이면 첫 점 복제 추가
+      if (C.emit_closed_duplicate){
+        fo<<res.raceline[0].x<<","<<res.raceline[0].y<<"\n";
+      }
     }
+
     // raceline with geom
     {
       std::ofstream fo(base + "_raceline_with_geom.csv");
       if(!fo){ cerr<<"[ERR] save raceline_with_geom\n"; return 8; }
       fo.setf(std::ios::fixed); fo.precision(9);
       fo<<"s,x,y,heading_rad,curvature,alpha_last\n";
-      for(int k=0;k<C.samples;++k){
-        double si = s0 + L * (double(k) / double(C.samples));
+
+      const int N = (int)res.raceline.size();
+      for(int k=0;k<N;++k){
+        double si = s0 + L * (double(k) / double(N));   // N분할 균일
         double si_rel = si - s0;
         fo<<si_rel<<","<<res.raceline[k].x<<","<<res.raceline[k].y<<","
           <<res.heading[k]<<","<<res.curvature[k]<<","<<res.alpha_last[k]<<"\n";
       }
+
+      // 폐곡이면 마지막 한 줄( s=L ) 추가: 첫 샘플 복제
+      if (C.emit_closed_duplicate){
+        fo<<L<<","<<res.raceline[0].x<<","<<res.raceline[0].y<<","
+          <<res.heading[0]<<","<<res.curvature[0]<<","<<res.alpha_last[0]<<"\n";
+      }
     }
+
     if(C.verbose){
       cerr<<"[OK] raceline saved: "<<base<<"_raceline.csv\n";
       cerr<<"[OK] raceline+geom saved: "<<base<<"_raceline_with_geom.csv\n";
